@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from elevenlabs import VoiceSettings
 from elevenlabs.client import ElevenLabs
-from langgraph.pregel.remote import RemoteGraph
 from langgraph_sdk import get_sync_client
 from langchain_core.messages import HumanMessage, convert_to_messages
 
