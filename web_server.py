@@ -22,6 +22,9 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 voice_id = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
 
+# Server URL for absolute audio URLs
+SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5001")
+
 # LangGraph setup
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:8123")
 LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
@@ -237,7 +240,7 @@ def chat():
         
         return jsonify({
             'response': response_text,
-            'audio_url': f'/audio/{audio_id}'
+            'audio_url': f'{SERVER_URL}/audio/{audio_id}'
         })
         
     except Exception as e:
@@ -311,7 +314,7 @@ def process_voice():
         return jsonify({
             'transcript': transcript_text,
             'response': response_text,
-            'audio_url': f'/audio/{audio_id}'
+            'audio_url': f'{SERVER_URL}/audio/{audio_id}'
         })
         
     except Exception as e:
