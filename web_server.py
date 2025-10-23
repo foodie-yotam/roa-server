@@ -22,8 +22,9 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 voice_id = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
 
-# Server URL for absolute audio URLs
-SERVER_URL = os.getenv("SERVER_URL", "http://localhost:5001")
+# Server URL for absolute audio URLs (Railway provides RAILWAY_PUBLIC_DOMAIN automatically)
+railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+SERVER_URL = f"https://{railway_domain}" if railway_domain else os.getenv("SERVER_URL", "http://localhost:5001")
 
 # LangGraph setup
 LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:8123")
@@ -32,6 +33,7 @@ GRAPH_NAME = "agent"  # Deployed graph name
 
 # Create LangGraph client
 langgraph_client = get_sync_client(url=LANGGRAPH_URL, api_key=LANGSMITH_API_KEY)
+print(f"🌐 Server URL: {SERVER_URL}")
 print(f"🔗 Connecting to LangGraph at: {LANGGRAPH_URL}")
 print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'None'}...")
 
