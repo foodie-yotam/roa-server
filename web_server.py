@@ -264,16 +264,9 @@ def process_voice():
         
         # Save to BytesIO
         audio_bytes = io.BytesIO(audio_file.read())
-        # Whisper supports webm, opus, wav, mp3, etc. - use generic name
-        audio_bytes.name = "audio.webm"  # Works for opus-encoded webm
+        audio_bytes.name = "audio.wav"
         audio_size = len(audio_bytes.getvalue())
-        print(f"📊 [Backend] Audio size: {audio_size} bytes ({audio_size / 1024:.1f} KB)")
-        
-        # Log compression effectiveness
-        if audio_size < 200000:
-            print("✅ [Backend] Good compression - fast upload!")
-        else:
-            print("⚠️ [Backend] Large file - may be slow")
+        print(f"📊 [Backend] Audio size: {audio_size} bytes")
         
         # Transcribe with Whisper
         print("🎧 [Backend] Starting Whisper transcription...")
