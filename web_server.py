@@ -159,32 +159,42 @@ def process_voice_text_only():
 def chat():
     """Simple chat endpoint without Whisper (uses browser speech recognition)"""
     try:
+        print("=" * 60)
+        print("💬 [Backend] /chat endpoint hit")
+        
         data = request.json
         message = data.get('message', '')
         user_id = data.get('user_id', 'web-user')
         
-        if not message:
-            return jsonify({'error': 'No message provided'}), 400
+        print(f"📝 [Backend] Message: {message}")
+        print(f"👤 [Backend] User ID: {user_id}")
         
-        print(f"Message: {message}")
+        if not message:
+            print("❌ [Backend] No message provided")
+            return jsonify({'error': 'No message provided'}), 400
         
         # Get or create thread for this user
         thread_id = get_or_create_thread(user_id)
+        print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Send to agent with thread_id for conversation memory
-        print(f"Sending to agent (thread: {thread_id})...")
+        print(f"🚀 [Backend] Sending to LangGraph agent...")
         
         # Prepare input for LangGraph
         input_data = {"messages": [{"role": "user", "content": message}]}
+        print(f"📦 [Backend] Input data: {input_data}")
         
         # Call LangGraph Cloud using SDK
         response_text = ""
+        chunk_count = 0
         for chunk in langgraph_client.runs.stream(
             thread_id,
             GRAPH_NAME,
             input=input_data,
             stream_mode="updates"
         ):
+            chunk_count += 1
+            print(f"📨 [Backend] Chunk {chunk_count} received")
             if chunk.data and "run_id" not in chunk.data:
                 for key, value in chunk.data.items():
                     if isinstance(value, dict) and "messages" in value:
@@ -193,9 +203,13 @@ def chat():
                             last_msg = messages[-1]
                             if isinstance(last_msg, dict) and "content" in last_msg:
                                 response_text = last_msg["content"]
+                                print(f"✅ [Backend] Response extracted: {response_text[:100]}...")
+        
+        print(f"📊 [Backend] Total chunks processed: {chunk_count}")
         
         if not response_text:
             response_text = "I apologize, but I couldn't process your request. Please try again."
+            print("⚠️ [Backend] No response from agent, using fallback")
         
         print(f"Agent response: {response_text}")
         
@@ -233,32 +247,44 @@ def chat():
 @app.route('/process_voice', methods=['POST'])
 def process_voice():
     try:
+        print("=" * 60)
+        print("🎙️ [Backend] /process_voice endpoint hit")
+        
         # Get audio file and user_id
         audio_file = request.files['audio']
         user_id = request.form.get('user_id', 'web-user')
         
+        print(f"📁 [Backend] Audio file received: {audio_file.filename}")
+        print(f"👤 [Backend] User ID: {user_id}")
+        
         # Save to BytesIO
         audio_bytes = io.BytesIO(audio_file.read())
         audio_bytes.name = "audio.wav"
+        audio_size = len(audio_bytes.getvalue())
+        print(f"📊 [Backend] Audio size: {audio_size} bytes")
         
         # Transcribe with Whisper
-        print("Transcribing...")
+        print("🎧 [Backend] Starting Whisper transcription...")
         transcription = openai_client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_bytes
         )
         transcript_text = transcription.text
-        print(f"Transcript: {transcript_text}")
+        print(f"✅ [Backend] Transcript: {transcript_text}")
         
         # Get or create thread for this user
         thread_id = get_or_create_thread(user_id)
+        print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Call agent
+        print("🤖 [Backend] Calling LangGraph agent...")
         response_text = call_agent(thread_id, transcript_text)
+        print(f"💬 [Backend] Agent response: {response_text[:100]}...")
         
         # Generate speech with ElevenLabs
-        print("Generating speech...")
+        print("🔊 [Backend] Generating speech with ElevenLabs...")
         cleaned_text = response_text.replace("**", "")
+        print(f"📝 [Backend] Cleaned text length: {len(cleaned_text)} chars")
         
         audio_response = elevenlabs_client.text_to_speech.convert(
             voice_id=voice_id,
@@ -277,6 +303,10 @@ def process_voice():
         audio_id = str(hash(response_text))
         audio_data = b''.join(audio_response)
         audio_cache[audio_id] = audio_data
+        print(f"💾 [Backend] Audio cached with ID: {audio_id}, size: {len(audio_data)} bytes")
+        
+        print(f"✅ [Backend] Request completed successfully")
+        print("=" * 60)
         
         return jsonify({
             'transcript': transcript_text,
@@ -285,7 +315,11 @@ def process_voice():
         })
         
     except Exception as e:
-        print(f"Error: {e}")
+        print("=" * 60)
+        print(f"💥 [Backend] Exception in /process_voice: {e}")
+        import traceback
+        print(f"📍 [Backend] Traceback:\n{traceback.format_exc()}")
+        print("=" * 60)
         return jsonify({'error': str(e)}), 500
 
 @app.route('/audio/<audio_id>')
