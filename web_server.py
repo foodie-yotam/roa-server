@@ -3,7 +3,7 @@
 import os
 import io
 import uuid
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -83,16 +83,16 @@ def call_agent(thread_id: str, message: str) -> str:
 
 @app.route('/')
 def index():
-    # Serve HTML from interface folder
-    interface_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'interface', 'web_voice.html')
-    print(f"🌐 Serving HTML from: {interface_path}")
-    print(f"📁 File exists: {os.path.exists(interface_path)}")
-    if os.path.exists(interface_path):
-        print(f"✅ Serving web_voice.html")
-        return send_file(interface_path)
-    else:
-        print(f"❌ File not found at {interface_path}")
-        return jsonify({"error": "HTML file not found", "path": interface_path}), 404
+    return jsonify({
+        "service": "ROA Voice API",
+        "status": "running",
+        "endpoints": {
+            "/chat": "POST - Text chat with agent",
+            "/process_voice": "POST - Voice input processing",
+            "/process_voice_text_only": "POST - Voice to text only",
+            "/audio/<filename>": "GET - Retrieve audio response"
+        }
+    })
 
 @app.route('/process_voice_text_only', methods=['POST'])
 def process_voice_text_only():
