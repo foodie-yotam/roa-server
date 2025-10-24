@@ -4,7 +4,7 @@ import os
 import io
 import uuid
 import json
-from typing import Generator
+from typing import Generator, Optional, Tuple
 from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -42,17 +42,25 @@ print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'N
 # Thread cache: maps user_id to thread_id
 thread_cache = {}
 
+
+def _generate_thread_token() -> str:
+    """Create a new token to associate with a LangGraph thread."""
+    return str(uuid.uuid4())
+
 # Store audio responses temporarily
 audio_cache = {}
 
-def get_or_create_thread(user_id: str) -> str:
-    """Get existing thread_id for user or create a new one"""
-    if user_id not in thread_cache:
-        # Create a new thread for this user
+def get_or_create_thread(token: Optional[str] = None) -> Tuple[str, str]:
+    """Return (thread_token, thread_id), generating both if needed."""
+    if not token:
+        token = _generate_thread_token()
+
+    if token not in thread_cache:
         thread = langgraph_client.threads.create()
-        thread_cache[user_id] = thread["thread_id"]
-        print(f"Created new thread for user {user_id}: {thread['thread_id']}")
-    return thread_cache[user_id]
+        thread_cache[token] = thread["thread_id"]
+        print(f"Created new thread: token={token}, thread_id={thread['thread_id']}")
+
+    return token, thread_cache[token]
 
 def call_agent(thread_id: str, message: str) -> str:
     """Call the LangGraph agent and return response"""
@@ -112,6 +120,9 @@ def process_voice_text_only():
         # Get audio file and user_id
         audio_file = request.files['audio']
         user_id = request.form.get('user_id', 'web-user')
+        thread_hint = request.form.get('thread_token') or request.headers.get('X-Thread-Token')
+        if not thread_hint and user_id:
+            thread_hint = user_id
         
         # Save to BytesIO
         audio_bytes = io.BytesIO(audio_file.read())
@@ -126,8 +137,8 @@ def process_voice_text_only():
         transcript_text = transcription.text
         print(f"Transcript: {transcript_text}")
         
-        # Get or create thread for this user
-        thread_id = get_or_create_thread(user_id)
+        # Get or create thread for this user/conversation
+        thread_token, thread_id = get_or_create_thread(thread_hint)
         
         # Send to agent with thread_id for conversation memory
         print(f"Sending to agent (thread: {thread_id})...")
@@ -157,10 +168,12 @@ def process_voice_text_only():
         
         print(f"Agent response: {response_text}")
         
-        return jsonify({
+        response = jsonify({
             'transcript': transcript_text,
             'response': response_text
         })
+        response.headers["X-Thread-Token"] = thread_token
+        return response
         
     except Exception as e:
         print(f"Error: {e}")
@@ -176,6 +189,9 @@ def chat():
         data = request.json
         message = data.get('message', '')
         user_id = data.get('user_id', 'web-user')
+        thread_hint = data.get('thread_token') or request.headers.get('X-Thread-Token')
+        if not thread_hint and user_id:
+            thread_hint = user_id
         
         print(f"📝 [Backend] Message: {message}")
         print(f"👤 [Backend] User ID: {user_id}")
@@ -184,8 +200,8 @@ def chat():
             print("❌ [Backend] No message provided")
             return jsonify({'error': 'No message provided'}), 400
         
-        # Get or create thread for this user
-        thread_id = get_or_create_thread(user_id)
+        # Get or create thread for this user/conversation
+        thread_token, thread_id = get_or_create_thread(thread_hint)
         print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Send to agent with thread_id for conversation memory
@@ -246,10 +262,12 @@ def chat():
         audio_data = b''.join(audio_response)
         audio_cache[audio_id] = audio_data
         
-        return jsonify({
+        response = jsonify({
             'response': response_text,
             'audio_url': f'{SERVER_URL}/audio/{audio_id}'
         })
+        response.headers["X-Thread-Token"] = thread_token
+        return response
         
     except Exception as e:
         print(f"Error: {e}")
@@ -264,6 +282,9 @@ def process_voice():
         # Get audio file and user_id
         audio_file = request.files['audio']
         user_id = request.form.get('user_id', 'web-user')
+        thread_hint = request.form.get('thread_token') or request.headers.get('X-Thread-Token')
+        if not thread_hint and user_id and user_id != 'web-user':
+            thread_hint = user_id
         
         print(f"📁 [Backend] Audio file received: {audio_file.filename}")
         print(f"👤 [Backend] User ID: {user_id}")
@@ -284,7 +305,7 @@ def process_voice():
         print(f"✅ [Backend] Transcript: {transcript_text}")
         
         # Get or create thread for this user
-        thread_id = get_or_create_thread(user_id)
+        thread_token, thread_id = get_or_create_thread(thread_hint)
         print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Call agent
@@ -319,11 +340,14 @@ def process_voice():
         print(f"✅ [Backend] Request completed successfully")
         print("=" * 60)
         
-        return jsonify({
+        response_payload = {
             'transcript': transcript_text,
             'response': response_text,
             'audio_url': f'{SERVER_URL}/audio/{audio_id}'
-        })
+        }
+        response = jsonify(response_payload)
+        response.headers["X-Thread-Token"] = thread_token
+        return response
         
     except Exception as e:
         print("=" * 60)
@@ -472,21 +496,21 @@ def openai_chat_completions():
         if not user_message:
             return jsonify({"error": "No user message found"}), 400
         
-        # Get or create thread for this user
-        user_id = data.get('user', 'elevenlabs-user')
-        thread_id = get_or_create_thread(user_id)
-        
-        print(f"[OpenAI Endpoint] User: {user_id}, Thread: {thread_id}, Message: {user_message[:50]}...")
-        
+        # Determine thread token: prefer explicit token header, fallback to ElevenLabs caller ID or request user
+        header_token = request.headers.get('caller_id') or request.headers.get('X-Thread-Token')
+        user_id = data.get('user', header_token or 'elevenlabs-user')
+        thread_token = header_token or user_id
+        thread_token, thread_id = get_or_create_thread(thread_token)
+        print(f"[OpenAI Endpoint] User: {user_id}, Thread token: {thread_token}, Thread ID: {thread_id}, Message: {user_message[:50]}...")
         # Stream response in OpenAI format
-        return Response(
+        response = Response(
             stream_with_context(stream_openai_response(thread_id, user_message)),
-            mimetype='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'X-Accel-Buffering': 'no'
-            }
+            mimetype='text/event-stream'
         )
+        response.headers['Cache-Control'] = 'no-cache'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.headers['X-Thread-Token'] = thread_token
+        return response
         
     except Exception as e:
         print(f"[OpenAI Endpoint] Exception: {e}")
