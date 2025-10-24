@@ -3,7 +3,9 @@
 import os
 import io
 import uuid
-from flask import Flask, request, jsonify, send_file
+import json
+from typing import Generator
+from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -68,13 +70,16 @@ def call_agent(thread_id: str, message: str) -> str:
             print(f"📦 Chunk: {chunk.data if hasattr(chunk, 'data') else chunk}")
             if hasattr(chunk, 'data') and chunk.data and "run_id" not in chunk.data:
                 for key, value in chunk.data.items():
-                    if isinstance(value, dict) and "messages" in value:
+                    # Only capture assistant responses (not tool calls)
+                    if key == "assistant" and isinstance(value, dict) and "messages" in value:
                         messages = value["messages"]
                         if messages and len(messages) > 0:
                             last_msg = messages[-1]
                             if isinstance(last_msg, dict) and "content" in last_msg:
-                                response_text = last_msg["content"]
-                                print(f"✅ Got response: {response_text[:100]}...")
+                                content = last_msg.get("content", "")
+                                if content and isinstance(content, str) and content.strip():
+                                    response_text = content
+                                    print(f"✅ Got response: {response_text[:100]}...")
     except Exception as e:
         print(f"❌ LangGraph error: {type(e).__name__}: {e}")
         import traceback
@@ -95,7 +100,8 @@ def index():
             "/chat": "POST - Text chat with agent",
             "/process_voice": "POST - Voice input processing",
             "/process_voice_text_only": "POST - Voice to text only",
-            "/audio/<filename>": "GET - Retrieve audio response"
+            "/audio/<filename>": "GET - Retrieve audio response",
+            "/v1/chat/completions": "POST - OpenAI-compatible endpoint (for ElevenLabs)"
         }
     })
 
@@ -335,6 +341,159 @@ def get_audio(audio_id):
             mimetype='audio/mpeg'
         )
     return "Audio not found", 404
+
+
+# ============================================================================
+# OpenAI-Compatible Endpoint for ElevenLabs Conversational AI Integration
+# ============================================================================
+
+def stream_openai_response(thread_id: str, message: str) -> Generator[str, None, None]:
+    """
+    Stream LangGraph agent responses in OpenAI-compatible format.
+    This endpoint is used by ElevenLabs Conversational AI Custom LLM integration.
+    """
+    input_data = {"messages": [{"role": "user", "content": message}]}
+    has_content = False
+    accumulated_text = ""
+    
+    try:
+        print(f"[OpenAI Endpoint] Calling LangGraph: thread={thread_id}")
+        
+        # Stream from LangGraph
+        for chunk in langgraph_client.runs.stream(
+            thread_id,
+            GRAPH_NAME,
+            input=input_data,
+            stream_mode="updates"
+        ):
+            if hasattr(chunk, 'data') and chunk.data and "run_id" not in chunk.data:
+                for key, value in chunk.data.items():
+                    # Only capture assistant responses (not tool calls)
+                    if key == "assistant" and isinstance(value, dict) and "messages" in value:
+                        messages = value["messages"]
+                        if messages and len(messages) > 0:
+                            last_msg = messages[-1]
+                            if isinstance(last_msg, dict) and "content" in last_msg:
+                                content = last_msg.get("content", "")
+                                # Only send if there's actual text content
+                                if content and isinstance(content, str) and content.strip():
+                                    response_text = content
+                                    accumulated_text = response_text
+                                    
+                                    # Stream in OpenAI format
+                                    chunk_data = {
+                                        "id": f"chatcmpl-{thread_id}",
+                                        "object": "chat.completion.chunk",
+                                        "created": 1234567890,
+                                        "model": "langgraph-agent",
+                                        "choices": [{
+                                            "index": 0,
+                                            "delta": {
+                                                "content": response_text if not has_content else "",
+                                                "role": "assistant" if not has_content else None
+                                            },
+                                            "finish_reason": None
+                                        }]
+                                    }
+                                    has_content = True
+                                    yield f"data: {json.dumps(chunk_data)}\n\n"
+        
+        # Send final chunk with finish_reason
+        if has_content:
+            final_chunk = {
+                "id": f"chatcmpl-{thread_id}",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "langgraph-agent",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            }
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+        
+        # OpenAI completion signal
+        yield "data: [DONE]\n\n"
+        print(f"[OpenAI Endpoint] Response complete: {accumulated_text[:100]}...")
+        
+    except Exception as e:
+        print(f"[OpenAI Endpoint] Error: {e}")
+        error_chunk = {
+            "id": f"chatcmpl-error",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "langgraph-agent",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "content": f"I apologize, but I encountered an error: {str(e)}",
+                    "role": "assistant"
+                },
+                "finish_reason": "stop"
+            }]
+        }
+        yield f"data: {json.dumps(error_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+@app.route('/v1/chat/completions', methods=['POST'])
+def openai_chat_completions():
+    """
+    OpenAI-compatible chat completions endpoint for ElevenLabs integration.
+    
+    This endpoint allows ElevenLabs Conversational AI to use our LangGraph agent
+    as a Custom LLM by providing an OpenAI-compatible API interface.
+    
+    Expected request format:
+    {
+        "messages": [{"role": "user", "content": "message text"}],
+        "model": "langgraph-agent",
+        "stream": true,
+        "user": "user_id"
+    }
+    """
+    try:
+        data = request.get_json()
+        print(f"[OpenAI Endpoint] Received request: {len(data.get('messages', []))} messages")
+        
+        # Extract messages
+        messages = data.get('messages', [])
+        if not messages:
+            return jsonify({"error": "No messages provided"}), 400
+        
+        # Get the last user message
+        user_message = None
+        for msg in reversed(messages):
+            if msg.get('role') == 'user':
+                user_message = msg.get('content')
+                break
+        
+        if not user_message:
+            return jsonify({"error": "No user message found"}), 400
+        
+        # Get or create thread for this user
+        user_id = data.get('user', 'elevenlabs-user')
+        thread_id = get_or_create_thread(user_id)
+        
+        print(f"[OpenAI Endpoint] User: {user_id}, Thread: {thread_id}, Message: {user_message[:50]}...")
+        
+        # Stream response in OpenAI format
+        return Response(
+            stream_with_context(stream_openai_response(thread_id, user_message)),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'
+            }
+        )
+        
+    except Exception as e:
+        print(f"[OpenAI Endpoint] Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5001))
