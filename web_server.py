@@ -94,7 +94,7 @@ def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool =
     Each unique caller_id maps to the same thread_id consistently.
     
     Args:
-        caller_id: Unique caller identifier (from ElevenLabs or other source)
+        caller_id: Unique caller identifier (from ElevenLabs convo_id or caller_id)
         is_staging: Whether to use staging environment
     
     Returns:
@@ -108,9 +108,55 @@ def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool =
     # Hash caller_id to create deterministic thread ID
     thread_id = _hash_caller_id(caller_id, is_staging)
     env = "staging" if is_staging else "production"
-    print(f"🔗 {env.capitalize()} thread for caller '{caller_id[:30]}...' → thread_id: {thread_id}")
+    print(f"🔗 {env.capitalize()} thread for ElevenLabs convo '{caller_id[:30]}...' → thread_id: {thread_id}")
     
     return thread_id
+
+
+# ============================================================================
+# Alternative Thread Management (Time-Based Expiry) - Currently Unused
+# ============================================================================
+
+def get_thread_id_with_expiry(caller_id: Optional[str] = None, is_staging: bool = False, expiry_hours: int = 24) -> str:
+    """Alternative: Get thread ID with time-based expiry (currently unused).
+    
+    This function implements time-based thread expiry by appending a date suffix
+    to the thread ID. Threads automatically expire after the specified hours.
+    
+    Example:
+        - Same caller on Monday → thread_id: "prod-abc123-2025-01-27"
+        - Same caller on Tuesday → thread_id: "prod-abc123-2025-01-28"
+        - Conversations reset daily (or based on expiry_hours)
+    
+    Args:
+        caller_id: Unique caller identifier
+        is_staging: Whether to use staging environment
+        expiry_hours: Hours until thread expires (default: 24)
+    
+    Returns:
+        Thread ID with date suffix for automatic expiry
+    """
+    import datetime
+    
+    if not caller_id:
+        caller_id = _generate_thread_id()
+    
+    # Hash the base caller_id
+    base_thread_id = _hash_caller_id(caller_id, is_staging)
+    
+    # Calculate expiry bucket (rounds down to nearest expiry period)
+    now = datetime.datetime.utcnow()
+    hours_since_epoch = int(now.timestamp() / 3600)
+    expiry_bucket = hours_since_epoch // expiry_hours
+    
+    # Append expiry bucket to thread ID
+    # This ensures threads expire after expiry_hours
+    thread_id_with_expiry = f"{base_thread_id}-{expiry_bucket}"
+    
+    env = "staging" if is_staging else "production"
+    print(f"🔗 {env.capitalize()} thread (expires in {expiry_hours}h) for '{caller_id[:30]}...' → {thread_id_with_expiry}")
+    
+    return thread_id_with_expiry
 
 def call_agent(thread_id: str, message: str, is_staging: bool = False) -> str:
     """Call the LangGraph agent and return response
@@ -198,8 +244,8 @@ def process_voice_text_only():
         # Detect staging environment
         is_staging = request.headers.get('staging', 'false').lower() == 'true'
         
-        # Get caller_id (prefer header, fallback to form data)
-        caller_id = request.headers.get('caller_id') or thread_hint
+        # Get caller_id - prioritize ElevenLabs convo_id, fallback to caller_id or thread_hint
+        caller_id = request.headers.get('convo_id') or request.headers.get('caller_id') or thread_hint
         
         # Get thread ID for this caller (no caching, LangGraph manages persistence)
         thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
@@ -247,8 +293,8 @@ def chat():
         # Detect staging environment
         is_staging = request.headers.get('staging', 'false').lower() == 'true'
         
-        # Get caller_id (prefer header, fallback to form data)
-        caller_id = request.headers.get('caller_id') or thread_hint
+        # Get caller_id - prioritize ElevenLabs convo_id, fallback to caller_id or thread_hint
+        caller_id = request.headers.get('convo_id') or request.headers.get('caller_id') or thread_hint
         
         # Get thread ID for this caller
         thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
@@ -529,12 +575,15 @@ def openai_chat_completions():
         is_staging = request.headers.get('staging', 'false').lower() == 'true'
         env = "staging" if is_staging else "production"
         
-        # Get caller_id from ElevenLabs (unique per phone call/conversation)
-        # This ensures each caller gets their own isolated thread
-        caller_id = request.headers.get('caller_id') or request.headers.get('X-Thread-Token')
-        if not caller_id:
-            # Fallback to user field in request body
-            caller_id = data.get('user', 'elevenlabs-user-fallback')
+        # Get caller_id from ElevenLabs (unique per conversation)
+        # Priority: convo_id (ElevenLabs conversation ID) > caller_id > X-Thread-Token > user field
+        # This ensures each conversation gets its own isolated thread
+        caller_id = (
+            request.headers.get('convo_id') or 
+            request.headers.get('caller_id') or 
+            request.headers.get('X-Thread-Token') or
+            data.get('user', 'elevenlabs-user-fallback')
+        )
         
         # Get thread ID for this specific caller (LangGraph manages persistence)
         thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
