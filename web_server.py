@@ -47,6 +47,10 @@ print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'N
 # Store audio responses temporarily
 audio_cache = {}
 
+# Thread cache: maps our deterministic thread_id to LangGraph's actual thread_id
+# This is lightweight - just stores the mapping, LangGraph stores the actual conversation
+thread_id_cache = {}
+
 
 def _generate_thread_id() -> str:
     """Generate a random thread ID for fallback cases."""
@@ -88,29 +92,40 @@ def get_langgraph_client(is_staging: bool = False):
 
 
 def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool = False) -> str:
-    """Get deterministic thread ID for a caller.
+    """Get or create LangGraph thread for a caller.
     
-    No caching needed - LangGraph manages thread persistence internally.
-    Each unique caller_id maps to the same thread_id consistently.
+    Creates a deterministic mapping: caller_id → LangGraph thread_id
+    The thread is actually created in LangGraph on first use.
     
     Args:
         caller_id: Unique caller identifier (from ElevenLabs convo_id or caller_id)
         is_staging: Whether to use staging environment
     
     Returns:
-        Thread ID to use with LangGraph API
+        LangGraph thread ID to use with API calls
     """
     # Generate fallback if no caller_id provided
     if not caller_id:
         caller_id = _generate_thread_id()
-        print(f"⚠️  No caller_id provided, generated random thread: {caller_id}")
+        print(f"⚠️  No caller_id provided, generated random: {caller_id}")
     
-    # Hash caller_id to create deterministic thread ID
-    thread_id = _hash_caller_id(caller_id, is_staging)
+    # Create deterministic cache key
+    cache_key = _hash_caller_id(caller_id, is_staging)
     env = "staging" if is_staging else "production"
-    print(f"🔗 {env.capitalize()} thread for ElevenLabs convo '{caller_id[:30]}...' → thread_id: {thread_id}")
     
-    return thread_id
+    # Check if we already have a LangGraph thread for this caller
+    if cache_key not in thread_id_cache:
+        # Create actual thread in LangGraph
+        client = get_langgraph_client(is_staging)
+        thread = client.threads.create()
+        langgraph_thread_id = thread["thread_id"]
+        thread_id_cache[cache_key] = langgraph_thread_id
+        print(f"✨ Created {env} thread for caller '{caller_id[:30]}...' → LangGraph thread: {langgraph_thread_id}")
+    else:
+        langgraph_thread_id = thread_id_cache[cache_key]
+        print(f"♻️  Reusing {env} thread for caller '{caller_id[:30]}...' → LangGraph thread: {langgraph_thread_id}")
+    
+    return langgraph_thread_id
 
 
 # ============================================================================
