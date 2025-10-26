@@ -28,18 +28,23 @@ voice_id = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
 railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
 SERVER_URL = f"https://{railway_domain}" if railway_domain else os.getenv("SERVER_URL", "http://localhost:5001")
 
-# LangGraph setup
-LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:8123")
+# LangGraph setup - Support both production and staging
+LANGGRAPH_URL_PROD = os.getenv("LANGGRAPH_URL_PROD", "https://roa-voice-prod-59235014c2ad5a5f830e9e124171824f.us.langgraph.app")
+LANGGRAPH_URL_STAGING = os.getenv("LANGGRAPH_URL_STAGING", "https://roa-voice-staging-66a6f6ec95d9546995a4f3352ad05df2.us.langgraph.app")
 LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
 GRAPH_NAME = "agent"  # Deployed graph name
 
-# Create LangGraph client
-langgraph_client = get_sync_client(url=LANGGRAPH_URL, api_key=LANGSMITH_API_KEY)
+# Create LangGraph clients for both environments
+langgraph_client_prod = get_sync_client(url=LANGGRAPH_URL_PROD, api_key=LANGSMITH_API_KEY)
+langgraph_client_staging = get_sync_client(url=LANGGRAPH_URL_STAGING, api_key=LANGSMITH_API_KEY)
+
 print(f"🌐 Server URL: {SERVER_URL}")
-print(f"🔗 Connecting to LangGraph at: {LANGGRAPH_URL}")
+print(f"🔗 Production LangGraph: {LANGGRAPH_URL_PROD}")
+print(f"🔗 Staging LangGraph: {LANGGRAPH_URL_STAGING}")
 print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'None'}...")
 
-# Thread cache: maps user_id to thread_id
+# Thread cache: maps (user_id, environment) to thread_id
+# Separate threads for prod and staging
 thread_cache = {}
 
 
@@ -50,26 +55,49 @@ def _generate_thread_token() -> str:
 # Store audio responses temporarily
 audio_cache = {}
 
-def get_or_create_thread(token: Optional[str] = None) -> Tuple[str, str]:
-    """Return (thread_token, thread_id), generating both if needed."""
+def get_langgraph_client(is_staging: bool = False):
+    """Get the appropriate LangGraph client based on environment."""
+    return langgraph_client_staging if is_staging else langgraph_client_prod
+
+
+def get_or_create_thread(token: Optional[str] = None, is_staging: bool = False) -> Tuple[str, str]:
+    """Return (thread_token, thread_id), generating both if needed.
+    
+    Args:
+        token: Thread token for conversation continuity
+        is_staging: Whether to use staging environment
+    """
     if not token:
         token = _generate_thread_token()
+    
+    # Create separate cache key for staging vs prod
+    cache_key = f"{token}:{'staging' if is_staging else 'prod'}"
+    
+    if cache_key not in thread_cache:
+        client = get_langgraph_client(is_staging)
+        thread = client.threads.create()
+        thread_cache[cache_key] = thread["thread_id"]
+        env = "staging" if is_staging else "production"
+        print(f"Created new {env} thread: token={token}, thread_id={thread['thread_id']}")
 
-    if token not in thread_cache:
-        thread = langgraph_client.threads.create()
-        thread_cache[token] = thread["thread_id"]
-        print(f"Created new thread: token={token}, thread_id={thread['thread_id']}")
+    return token, thread_cache[cache_key]
 
-    return token, thread_cache[token]
-
-def call_agent(thread_id: str, message: str) -> str:
-    """Call the LangGraph agent and return response"""
+def call_agent(thread_id: str, message: str, is_staging: bool = False) -> str:
+    """Call the LangGraph agent and return response
+    
+    Args:
+        thread_id: Thread ID for conversation
+        message: User message
+        is_staging: Whether to use staging environment
+    """
     input_data = {"messages": [{"role": "user", "content": message}]}
     response_text = ""
+    client = get_langgraph_client(is_staging)
+    env = "staging" if is_staging else "production"
     
     try:
-        print(f"📡 Calling LangGraph: thread={thread_id}, graph={GRAPH_NAME}")
-        for chunk in langgraph_client.runs.stream(
+        print(f"📡 Calling {env} LangGraph: thread={thread_id}, graph={GRAPH_NAME}")
+        for chunk in client.runs.stream(
             thread_id,
             GRAPH_NAME,
             input=input_data,
@@ -137,34 +165,17 @@ def process_voice_text_only():
         transcript_text = transcription.text
         print(f"Transcript: {transcript_text}")
         
+        # Detect staging environment
+        is_staging = request.headers.get('staging', 'false').lower() == 'true'
+        
         # Get or create thread for this user/conversation
-        thread_token, thread_id = get_or_create_thread(thread_hint)
+        thread_token, thread_id = get_or_create_thread(thread_hint, is_staging=is_staging)
         
         # Send to agent with thread_id for conversation memory
         print(f"Sending to agent (thread: {thread_id})...")
         
-        # Prepare input for LangGraph
-        input_data = {"messages": [{"role": "user", "content": transcript_text}]}
-        
-        # Call LangGraph Cloud using SDK
-        response_text = ""
-        for chunk in langgraph_client.runs.stream(
-            thread_id,
-            GRAPH_NAME,
-            input=input_data,
-            stream_mode="updates"
-        ):
-            if chunk.data and "run_id" not in chunk.data:
-                for key, value in chunk.data.items():
-                    if isinstance(value, dict) and "messages" in value:
-                        messages = value["messages"]
-                        if messages and len(messages) > 0:
-                            last_msg = messages[-1]
-                            if isinstance(last_msg, dict) and "content" in last_msg:
-                                response_text = last_msg["content"]
-        
-        if not response_text:
-            response_text = "I apologize, but I couldn't process your request. Please try again."
+        # Call agent with routing
+        response_text = call_agent(thread_id, transcript_text, is_staging=is_staging)
         
         print(f"Agent response: {response_text}")
         
@@ -200,43 +211,18 @@ def chat():
             print("❌ [Backend] No message provided")
             return jsonify({'error': 'No message provided'}), 400
         
+        # Detect staging environment
+        is_staging = request.headers.get('staging', 'false').lower() == 'true'
+        
         # Get or create thread for this user/conversation
-        thread_token, thread_id = get_or_create_thread(thread_hint)
+        thread_token, thread_id = get_or_create_thread(thread_hint, is_staging=is_staging)
         print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Send to agent with thread_id for conversation memory
         print(f"🚀 [Backend] Sending to LangGraph agent...")
         
-        # Prepare input for LangGraph
-        input_data = {"messages": [{"role": "user", "content": message}]}
-        print(f"📦 [Backend] Input data: {input_data}")
-        
-        # Call LangGraph Cloud using SDK
-        response_text = ""
-        chunk_count = 0
-        for chunk in langgraph_client.runs.stream(
-            thread_id,
-            GRAPH_NAME,
-            input=input_data,
-            stream_mode="updates"
-        ):
-            chunk_count += 1
-            print(f"📨 [Backend] Chunk {chunk_count} received")
-            if chunk.data and "run_id" not in chunk.data:
-                for key, value in chunk.data.items():
-                    if isinstance(value, dict) and "messages" in value:
-                        messages = value["messages"]
-                        if messages and len(messages) > 0:
-                            last_msg = messages[-1]
-                            if isinstance(last_msg, dict) and "content" in last_msg:
-                                response_text = last_msg["content"]
-                                print(f"✅ [Backend] Response extracted: {response_text[:100]}...")
-        
-        print(f"📊 [Backend] Total chunks processed: {chunk_count}")
-        
-        if not response_text:
-            response_text = "I apologize, but I couldn't process your request. Please try again."
-            print("⚠️ [Backend] No response from agent, using fallback")
+        # Call agent with routing
+        response_text = call_agent(thread_id, message, is_staging=is_staging)
         
         print(f"Agent response: {response_text}")
         
@@ -371,20 +357,27 @@ def get_audio(audio_id):
 # OpenAI-Compatible Endpoint for ElevenLabs Conversational AI Integration
 # ============================================================================
 
-def stream_openai_response(thread_id: str, message: str) -> Generator[str, None, None]:
+def stream_openai_response(thread_id: str, message: str, is_staging: bool = False) -> Generator[str, None, None]:
     """
     Stream LangGraph agent responses in OpenAI-compatible format.
     This endpoint is used by ElevenLabs Conversational AI Custom LLM integration.
+    
+    Args:
+        thread_id: Thread ID for conversation
+        message: User message
+        is_staging: Whether to use staging environment
     """
     input_data = {"messages": [{"role": "user", "content": message}]}
     has_content = False
     accumulated_text = ""
+    client = get_langgraph_client(is_staging)
+    env = "staging" if is_staging else "production"
     
     try:
-        print(f"[OpenAI Endpoint] Calling LangGraph: thread={thread_id}")
+        print(f"[OpenAI Endpoint] Calling {env} LangGraph: thread={thread_id}")
         
         # Stream from LangGraph
-        for chunk in langgraph_client.runs.stream(
+        for chunk in client.runs.stream(
             thread_id,
             GRAPH_NAME,
             input=input_data,
@@ -496,15 +489,20 @@ def openai_chat_completions():
         if not user_message:
             return jsonify({"error": "No user message found"}), 400
         
+        # Determine environment from 'staging' header (sent by ElevenLabs agents)
+        is_staging = request.headers.get('staging', 'false').lower() == 'true'
+        env = "staging" if is_staging else "production"
+        
         # Determine thread token: prefer explicit token header, fallback to ElevenLabs caller ID or request user
         header_token = request.headers.get('caller_id') or request.headers.get('X-Thread-Token')
         user_id = data.get('user', header_token or 'elevenlabs-user')
         thread_token = header_token or user_id
-        thread_token, thread_id = get_or_create_thread(thread_token)
-        print(f"[OpenAI Endpoint] User: {user_id}, Thread token: {thread_token}, Thread ID: {thread_id}, Message: {user_message[:50]}...")
+        thread_token, thread_id = get_or_create_thread(thread_token, is_staging=is_staging)
+        print(f"[OpenAI Endpoint] Environment: {env}, User: {user_id}, Thread token: {thread_token}, Thread ID: {thread_id}, Message: {user_message[:50]}...")
+        
         # Stream response in OpenAI format
         response = Response(
-            stream_with_context(stream_openai_response(thread_id, user_message)),
+            stream_with_context(stream_openai_response(thread_id, user_message, is_staging=is_staging)),
             mimetype='text/event-stream'
         )
         response.headers['Cache-Control'] = 'no-cache'
