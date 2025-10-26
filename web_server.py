@@ -172,10 +172,10 @@ def call_agent(thread_id: str, message: str, is_staging: bool = False) -> str:
     env = "staging" if is_staging else "production"
     
     try:
-        print(f"📡 Calling {env} LangGraph: thread={thread_id}, graph={GRAPH_NAME}")
+        print(f"📡 Calling {env} LangGraph: thread={thread_id}, assistant={GRAPH_NAME}")
         for chunk in client.runs.stream(
             thread_id,
-            GRAPH_NAME,
+            assistant_id=GRAPH_NAME,  # Use assistant_id parameter
             input=input_data,
             stream_mode="updates"
         ):
@@ -459,9 +459,10 @@ def stream_openai_response(thread_id: str, message: str, is_staging: bool = Fals
         print(f"[OpenAI Endpoint] Calling {env} LangGraph: thread={thread_id}")
         
         # Stream from LangGraph
+        # assistant_id is the deployed graph name
         for chunk in client.runs.stream(
             thread_id,
-            GRAPH_NAME,
+            assistant_id=GRAPH_NAME,  # Use assistant_id parameter
             input=input_data,
             stream_mode="updates"
         ):
