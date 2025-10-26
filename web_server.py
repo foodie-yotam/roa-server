@@ -13,6 +13,7 @@ from elevenlabs import VoiceSettings
 from elevenlabs.client import ElevenLabs
 from langgraph_sdk import get_sync_client
 from langchain_core.messages import HumanMessage, convert_to_messages
+import hashlib
 
 load_dotenv()
 
@@ -43,44 +44,73 @@ print(f"🔗 Production LangGraph: {LANGGRAPH_URL_PROD}")
 print(f"🔗 Staging LangGraph: {LANGGRAPH_URL_STAGING}")
 print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'None'}...")
 
-# Thread cache: maps (user_id, environment) to thread_id
-# Separate threads for prod and staging
-thread_cache = {}
-
-
-def _generate_thread_token() -> str:
-    """Create a new token to associate with a LangGraph thread."""
-    return str(uuid.uuid4())
-
 # Store audio responses temporarily
 audio_cache = {}
+
+
+def _generate_thread_id() -> str:
+    """Generate a random thread ID for fallback cases."""
+    return str(uuid.uuid4())
+
+
+def _hash_caller_id(caller_id: str, is_staging: bool = False) -> str:
+    """Convert caller_id to a deterministic thread identifier.
+    
+    This ensures:
+    1. Each unique caller gets their own isolated thread
+    2. Same caller always maps to same thread (conversation continuity within session)
+    3. Staging and production threads are separate
+    4. No server-side caching needed - LangGraph manages thread persistence
+    
+    Args:
+        caller_id: Unique identifier for the caller (from ElevenLabs)
+        is_staging: Whether this is for staging environment
+    
+    Returns:
+        Deterministic thread identifier that can be used directly with LangGraph
+    """
+    # Add environment prefix to ensure staging/prod separation
+    env_prefix = "staging" if is_staging else "prod"
+    
+    # Create deterministic hash from caller_id
+    # Using SHA256 for consistent, collision-resistant hashing
+    combined = f"{env_prefix}:{caller_id}"
+    hash_obj = hashlib.sha256(combined.encode('utf-8'))
+    
+    # Return first 16 chars of hex digest for readability
+    # This gives us 64 bits of entropy (extremely low collision probability)
+    return f"{env_prefix}-{hash_obj.hexdigest()[:16]}"
+
 
 def get_langgraph_client(is_staging: bool = False):
     """Get the appropriate LangGraph client based on environment."""
     return langgraph_client_staging if is_staging else langgraph_client_prod
 
 
-def get_or_create_thread(token: Optional[str] = None, is_staging: bool = False) -> Tuple[str, str]:
-    """Return (thread_token, thread_id), generating both if needed.
+def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool = False) -> str:
+    """Get deterministic thread ID for a caller.
+    
+    No caching needed - LangGraph manages thread persistence internally.
+    Each unique caller_id maps to the same thread_id consistently.
     
     Args:
-        token: Thread token for conversation continuity
+        caller_id: Unique caller identifier (from ElevenLabs or other source)
         is_staging: Whether to use staging environment
+    
+    Returns:
+        Thread ID to use with LangGraph API
     """
-    if not token:
-        token = _generate_thread_token()
+    # Generate fallback if no caller_id provided
+    if not caller_id:
+        caller_id = _generate_thread_id()
+        print(f"⚠️  No caller_id provided, generated random thread: {caller_id}")
     
-    # Create separate cache key for staging vs prod
-    cache_key = f"{token}:{'staging' if is_staging else 'prod'}"
+    # Hash caller_id to create deterministic thread ID
+    thread_id = _hash_caller_id(caller_id, is_staging)
+    env = "staging" if is_staging else "production"
+    print(f"🔗 {env.capitalize()} thread for caller '{caller_id[:30]}...' → thread_id: {thread_id}")
     
-    if cache_key not in thread_cache:
-        client = get_langgraph_client(is_staging)
-        thread = client.threads.create()
-        thread_cache[cache_key] = thread["thread_id"]
-        env = "staging" if is_staging else "production"
-        print(f"Created new {env} thread: token={token}, thread_id={thread['thread_id']}")
-
-    return token, thread_cache[cache_key]
+    return thread_id
 
 def call_agent(thread_id: str, message: str, is_staging: bool = False) -> str:
     """Call the LangGraph agent and return response
@@ -168,8 +198,11 @@ def process_voice_text_only():
         # Detect staging environment
         is_staging = request.headers.get('staging', 'false').lower() == 'true'
         
-        # Get or create thread for this user/conversation
-        thread_token, thread_id = get_or_create_thread(thread_hint, is_staging=is_staging)
+        # Get caller_id (prefer header, fallback to form data)
+        caller_id = request.headers.get('caller_id') or thread_hint
+        
+        # Get thread ID for this caller (no caching, LangGraph manages persistence)
+        thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
         
         # Send to agent with thread_id for conversation memory
         print(f"Sending to agent (thread: {thread_id})...")
@@ -183,7 +216,7 @@ def process_voice_text_only():
             'transcript': transcript_text,
             'response': response_text
         })
-        response.headers["X-Thread-Token"] = thread_token
+        response.headers["X-Thread-Token"] = thread_id
         return response
         
     except Exception as e:
@@ -214,8 +247,11 @@ def chat():
         # Detect staging environment
         is_staging = request.headers.get('staging', 'false').lower() == 'true'
         
-        # Get or create thread for this user/conversation
-        thread_token, thread_id = get_or_create_thread(thread_hint, is_staging=is_staging)
+        # Get caller_id (prefer header, fallback to form data)
+        caller_id = request.headers.get('caller_id') or thread_hint
+        
+        # Get thread ID for this caller
+        thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
         print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Send to agent with thread_id for conversation memory
@@ -252,7 +288,7 @@ def chat():
             'response': response_text,
             'audio_url': f'{SERVER_URL}/audio/{audio_id}'
         })
-        response.headers["X-Thread-Token"] = thread_token
+        response.headers["X-Thread-Token"] = thread_id
         return response
         
     except Exception as e:
@@ -332,7 +368,7 @@ def process_voice():
             'audio_url': f'{SERVER_URL}/audio/{audio_id}'
         }
         response = jsonify(response_payload)
-        response.headers["X-Thread-Token"] = thread_token
+        response.headers["X-Thread-Token"] = thread_id
         return response
         
     except Exception as e:
@@ -493,12 +529,16 @@ def openai_chat_completions():
         is_staging = request.headers.get('staging', 'false').lower() == 'true'
         env = "staging" if is_staging else "production"
         
-        # Determine thread token: prefer explicit token header, fallback to ElevenLabs caller ID or request user
-        header_token = request.headers.get('caller_id') or request.headers.get('X-Thread-Token')
-        user_id = data.get('user', header_token or 'elevenlabs-user')
-        thread_token = header_token or user_id
-        thread_token, thread_id = get_or_create_thread(thread_token, is_staging=is_staging)
-        print(f"[OpenAI Endpoint] Environment: {env}, User: {user_id}, Thread token: {thread_token}, Thread ID: {thread_id}, Message: {user_message[:50]}...")
+        # Get caller_id from ElevenLabs (unique per phone call/conversation)
+        # This ensures each caller gets their own isolated thread
+        caller_id = request.headers.get('caller_id') or request.headers.get('X-Thread-Token')
+        if not caller_id:
+            # Fallback to user field in request body
+            caller_id = data.get('user', 'elevenlabs-user-fallback')
+        
+        # Get thread ID for this specific caller (LangGraph manages persistence)
+        thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
+        print(f"[OpenAI Endpoint] Environment: {env}, Caller ID: {caller_id[:30]}..., Thread ID: {thread_id}, Message: {user_message[:50]}...")
         
         # Stream response in OpenAI format
         response = Response(
@@ -507,7 +547,7 @@ def openai_chat_completions():
         )
         response.headers['Cache-Control'] = 'no-cache'
         response.headers['X-Accel-Buffering'] = 'no'
-        response.headers['X-Thread-Token'] = thread_token
+        response.headers['X-Thread-Token'] = thread_id
         return response
         
     except Exception as e:
