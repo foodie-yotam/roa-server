@@ -1,8 +1,7 @@
 flask
 flask-cors
 python-dotenv
-openai
-elevenlabs
 langgraph-sdk
+langchain-core
 langchain-core
 gunicorn
