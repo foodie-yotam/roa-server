@@ -641,6 +641,84 @@ def openai_chat_completions():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/video-command', methods=['POST'])
+def video_command():
+    """
+    Process text command and return video visualization JSON.
+    Used by React Flow frontend to render visual displays.
+    
+    Expected request:
+    {
+        "text": "Show me pasta recipes"
+    }
+    
+    Returns:
+    {
+        "tool": "display_recipes",
+        "params": {"recipes": ["Pasta Carbonara", "Penne Arrabbiata"]}
+    }
+    """
+    try:
+        data = request.get_json()
+        text = data.get('text', '')
+        
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+        
+        # Determine environment from 'stage' header
+        environment = request.headers.get('stage', 'prod').lower()
+        if environment not in ['dev', 'staging', 'prod']:
+            environment = 'prod'
+        
+        # Get caller_id for thread management
+        caller_id = (
+            request.headers.get('convo_id') or 
+            request.headers.get('caller_id') or 
+            request.headers.get('X-Thread-Token') or
+            'video-user-fallback'
+        )
+        
+        # Get thread ID
+        thread_id = get_thread_id_for_caller(caller_id, environment=environment)
+        print(f"[Video Command] Environment: {environment}, Thread: {thread_id}, Text: {text}")
+        
+        # Call agent
+        response_text = call_agent(thread_id, text, environment=environment)
+        
+        # Try to extract JSON from response
+        # Agent tools return JSON strings, we need to parse them
+        import json
+        try:
+            # Look for JSON in the response
+            if '{"tool":' in response_text or '{"params":' in response_text:
+                # Find JSON substring
+                start = response_text.find('{')
+                end = response_text.rfind('}') + 1
+                json_str = response_text[start:end]
+                video_data = json.loads(json_str)
+                
+                return jsonify(video_data)
+            else:
+                # No visualization tool was called, return error
+                return jsonify({
+                    "error": "No visualization generated",
+                    "message": response_text
+                }), 400
+                
+        except json.JSONDecodeError as e:
+            print(f"[Video Command] JSON parse error: {e}")
+            return jsonify({
+                "error": "Invalid visualization format",
+                "message": response_text
+            }), 500
+        
+    except Exception as e:
+        print(f"[Video Command] Exception: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5001))
     print(f"Starting web server on port {port}")
