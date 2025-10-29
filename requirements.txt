@@ -3,5 +3,4 @@ flask-cors
 python-dotenv
 langgraph-sdk
 langchain-core
-langchain-core
 gunicorn
