@@ -8,9 +8,7 @@ from typing import Generator, Optional, Tuple
 from flask import Flask, request, jsonify, send_file, Response, stream_with_context
 from flask_cors import CORS
 from dotenv import load_dotenv
-from openai import OpenAI
-from elevenlabs import VoiceSettings
-from elevenlabs.client import ElevenLabs
+# OpenAI and ElevenLabs imports removed - using ElevenLabs widget directly
 from langgraph_sdk import get_sync_client
 from langchain_core.messages import HumanMessage, convert_to_messages
 import hashlib
@@ -20,10 +18,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# Initialize clients
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-elevenlabs_client = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
-voice_id = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
+# Clients removed - ElevenLabs widget handles STT/TTS directly
 
 # Server URL for absolute audio URLs (Railway provides RAILWAY_PUBLIC_DOMAIN automatically)
 railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
@@ -47,8 +42,7 @@ print(f"🔗 Staging LangGraph: {LANGGRAPH_URL_STAGING}")
 print(f"🔗 Production LangGraph: {LANGGRAPH_URL_PROD}")
 print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'None'}...")
 
-# Store audio responses temporarily
-audio_cache = {}
+# Audio cache removed - ElevenLabs widget handles TTS
 
 # Thread cache: maps our deterministic thread_id to LangGraph's actual thread_id
 # This is lightweight - just stores the mapping, LangGraph stores the actual conversation
@@ -236,72 +230,15 @@ def index():
         "service": "ROA Voice API",
         "status": "running",
         "endpoints": {
-            "/chat": "POST - Text chat with agent",
-            "/process_voice": "POST - Voice input processing",
-            "/process_voice_text_only": "POST - Voice to text only",
-            "/audio/<filename>": "GET - Retrieve audio response",
-            "/v1/chat/completions": "POST - OpenAI-compatible endpoint (for ElevenLabs)"
-        }
+            "/chat": "POST - Text chat with agent (testing only)",
+            "/v1/chat/completions": "POST - OpenAI-compatible endpoint (for ElevenLabs widget)"
+        },
+        "note": "Voice handled by ElevenLabs widget - no Whisper/TTS endpoints"
     })
-
-@app.route('/process_voice_text_only', methods=['POST'])
-def process_voice_text_only():
-    """Process voice without ElevenLabs (text response only)"""
-    try:
-        # Get audio file and user_id
-        audio_file = request.files['audio']
-        user_id = request.form.get('user_id', 'web-user')
-        thread_hint = request.form.get('thread_token') or request.headers.get('X-Thread-Token')
-        if not thread_hint and user_id:
-            thread_hint = user_id
-        
-        # Save to BytesIO
-        audio_bytes = io.BytesIO(audio_file.read())
-        audio_bytes.name = "audio.wav"
-        
-        # Transcribe with Whisper
-        print("Transcribing...")
-        transcription = openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_bytes
-        )
-        transcript_text = transcription.text
-        print(f"Transcript: {transcript_text}")
-        
-        # Detect environment from 'stage' header (sent by ElevenLabs)
-        # Values: "dev", "staging", "prod" (default to "prod")
-        environment = request.headers.get('stage', 'prod').lower()
-        if environment not in ['dev', 'staging', 'prod']:
-            environment = 'prod'
-        
-        # Get caller_id - prioritize ElevenLabs convo_id, fallback to caller_id or thread_hint
-        caller_id = request.headers.get('convo_id') or request.headers.get('caller_id') or thread_hint
-        
-        # Get thread ID for this caller (no caching, LangGraph manages persistence)
-        thread_id = get_thread_id_for_caller(caller_id, environment=environment)
-        
-        # Send to agent with thread_id for conversation memory
-        print(f"Sending to agent (thread: {thread_id})...")
-        
-        # Call agent with routing
-        response_text = call_agent(thread_id, transcript_text, environment=environment)
-        
-        print(f"Agent response: {response_text}")
-        
-        response = jsonify({
-            'transcript': transcript_text,
-            'response': response_text
-        })
-        response.headers["X-Thread-Token"] = thread_id
-        return response
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    """Simple chat endpoint without Whisper (uses browser speech recognition)"""
+    """Text chat endpoint for testing (no voice processing)"""
     try:
         print("=" * 60)
         print("💬 [Backend] /chat endpoint hit")
@@ -344,31 +281,8 @@ def chat():
         # Parse response for text and optional visualization
         parsed = parse_agent_response(response_text)
         
-        # Generate speech with ElevenLabs (only for text part)
-        print("Generating speech...")
-        cleaned_text = parsed["text"].replace("**", "")
-        
-        audio_response = elevenlabs_client.text_to_speech.convert(
-            voice_id=voice_id,
-            output_format="mp3_22050_32",
-            text=cleaned_text,
-            model_id="eleven_turbo_v2_5",
-            voice_settings=VoiceSettings(
-                stability=0.5,
-                similarity_boost=0.75,
-                style=0.0,
-                use_speaker_boost=True,
-            ),
-        )
-        
-        # Save audio to cache
-        audio_id = str(hash(response_text))
-        audio_data = b''.join(audio_response)
-        audio_cache[audio_id] = audio_data
-        
         response_data = {
-            'response': parsed["text"],
-            'audio_url': f'{SERVER_URL}/audio/{audio_id}'
+            'response': parsed["text"]
         }
         
         # Include visualization if present
@@ -382,100 +296,6 @@ def chat():
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({'error': str(e)}), 500
-
-@app.route('/process_voice', methods=['POST'])
-def process_voice():
-    try:
-        print("=" * 60)
-        print("🎙️ [Backend] /process_voice endpoint hit")
-        
-        # Get audio file and user_id
-        audio_file = request.files['audio']
-        user_id = request.form.get('user_id', 'web-user')
-        thread_hint = request.form.get('thread_token') or request.headers.get('X-Thread-Token')
-        if not thread_hint and user_id and user_id != 'web-user':
-            thread_hint = user_id
-        
-        print(f"📁 [Backend] Audio file received: {audio_file.filename}")
-        print(f"👤 [Backend] User ID: {user_id}")
-        
-        # Save to BytesIO
-        audio_bytes = io.BytesIO(audio_file.read())
-        audio_bytes.name = "audio.wav"
-        audio_size = len(audio_bytes.getvalue())
-        print(f"📊 [Backend] Audio size: {audio_size} bytes")
-        
-        # Transcribe with Whisper
-        print("🎧 [Backend] Starting Whisper transcription...")
-        transcription = openai_client.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_bytes
-        )
-        transcript_text = transcription.text
-        print(f"✅ [Backend] Transcript: {transcript_text}")
-        
-        # Get or create thread for this user
-        thread_token, thread_id = get_or_create_thread(thread_hint)
-        print(f"🧵 [Backend] Thread ID: {thread_id}")
-        
-        # Call agent
-        print("🤖 [Backend] Calling LangGraph agent...")
-        response_text = call_agent(thread_id, transcript_text)
-        print(f"💬 [Backend] Agent response: {response_text[:100]}...")
-        
-        # Generate speech with ElevenLabs
-        print("🔊 [Backend] Generating speech with ElevenLabs...")
-        cleaned_text = response_text.replace("**", "")
-        print(f"📝 [Backend] Cleaned text length: {len(cleaned_text)} chars")
-        
-        audio_response = elevenlabs_client.text_to_speech.convert(
-            voice_id=voice_id,
-            output_format="mp3_22050_32",
-            text=cleaned_text,
-            model_id="eleven_turbo_v2_5",
-            voice_settings=VoiceSettings(
-                stability=0.5,
-                similarity_boost=0.75,
-                style=0.0,
-                use_speaker_boost=True,
-            ),
-        )
-        
-        # Save audio to cache
-        audio_id = str(hash(response_text))
-        audio_data = b''.join(audio_response)
-        audio_cache[audio_id] = audio_data
-        print(f"💾 [Backend] Audio cached with ID: {audio_id}, size: {len(audio_data)} bytes")
-        
-        print(f"✅ [Backend] Request completed successfully")
-        print("=" * 60)
-        
-        response_payload = {
-            'transcript': transcript_text,
-            'response': response_text,
-            'audio_url': f'{SERVER_URL}/audio/{audio_id}'
-        }
-        response = jsonify(response_payload)
-        response.headers["X-Thread-Token"] = thread_id
-        return response
-        
-    except Exception as e:
-        print("=" * 60)
-        print(f"💥 [Backend] Exception in /process_voice: {e}")
-        import traceback
-        print(f"📍 [Backend] Traceback:\n{traceback.format_exc()}")
-        print("=" * 60)
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/audio/<audio_id>')
-def get_audio(audio_id):
-    if audio_id in audio_cache:
-        return send_file(
-            io.BytesIO(audio_cache[audio_id]),
-            mimetype='audio/mpeg'
-        )
-    return "Audio not found", 404
-
 
 # ============================================================================
 # OpenAI-Compatible Endpoint for ElevenLabs Conversational AI Integration
