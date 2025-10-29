@@ -341,9 +341,12 @@ def chat():
         
         print(f"Agent response: {response_text}")
         
-        # Generate speech with ElevenLabs
+        # Parse response for text and optional visualization
+        parsed = parse_agent_response(response_text)
+        
+        # Generate speech with ElevenLabs (only for text part)
         print("Generating speech...")
-        cleaned_text = response_text.replace("**", "")
+        cleaned_text = parsed["text"].replace("**", "")
         
         audio_response = elevenlabs_client.text_to_speech.convert(
             voice_id=voice_id,
@@ -363,10 +366,16 @@ def chat():
         audio_data = b''.join(audio_response)
         audio_cache[audio_id] = audio_data
         
-        response = jsonify({
-            'response': response_text,
+        response_data = {
+            'response': parsed["text"],
             'audio_url': f'{SERVER_URL}/audio/{audio_id}'
-        })
+        }
+        
+        # Include visualization if present
+        if parsed["visualization"]:
+            response_data['visualization'] = parsed["visualization"]
+        
+        response = jsonify(response_data)
         response.headers["X-Thread-Token"] = thread_id
         return response
         
@@ -641,82 +650,47 @@ def openai_chat_completions():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/video-command', methods=['POST'])
-def video_command():
+# Helper function to parse agent responses
+def parse_agent_response(response_text: str) -> dict:
     """
-    Process text command and return video visualization JSON.
-    Used by React Flow frontend to render visual displays.
+    Parse agent response for both text thoughts and optional visualization JSON.
     
-    Expected request:
-    {
-        "text": "Show me pasta recipes"
-    }
+    Format: "Text thoughts here. VISUALIZATION: {json}"
     
     Returns:
-    {
-        "tool": "display_recipes",
-        "params": {"recipes": ["Pasta Carbonara", "Penne Arrabbiata"]}
-    }
+        {
+            "text": "Text thoughts",
+            "visualization": {...} or None
+        }
     """
-    try:
-        data = request.get_json()
-        text = data.get('text', '')
+    import json
+    import re
+    
+    # Look for VISUALIZATION: marker
+    if "VISUALIZATION:" in response_text:
+        # Split on VISUALIZATION:
+        parts = response_text.split("VISUALIZATION:")
+        text_part = parts[0].strip()
         
-        if not text:
-            return jsonify({"error": "No text provided"}), 400
-        
-        # Determine environment from 'stage' header
-        environment = request.headers.get('stage', 'prod').lower()
-        if environment not in ['dev', 'staging', 'prod']:
-            environment = 'prod'
-        
-        # Get caller_id for thread management
-        caller_id = (
-            request.headers.get('convo_id') or 
-            request.headers.get('caller_id') or 
-            request.headers.get('X-Thread-Token') or
-            'video-user-fallback'
-        )
-        
-        # Get thread ID
-        thread_id = get_thread_id_for_caller(caller_id, environment=environment)
-        print(f"[Video Command] Environment: {environment}, Thread: {thread_id}, Text: {text}")
-        
-        # Call agent
-        response_text = call_agent(thread_id, text, environment=environment)
-        
-        # Try to extract JSON from response
-        # Agent tools return JSON strings, we need to parse them
-        import json
+        # Extract JSON from the visualization part
+        json_part = parts[1].strip()
         try:
-            # Look for JSON in the response
-            if '{"tool":' in response_text or '{"params":' in response_text:
-                # Find JSON substring
-                start = response_text.find('{')
-                end = response_text.rfind('}') + 1
-                json_str = response_text[start:end]
-                video_data = json.loads(json_str)
-                
-                return jsonify(video_data)
-            else:
-                # No visualization tool was called, return error
-                return jsonify({
-                    "error": "No visualization generated",
-                    "message": response_text
-                }), 400
-                
+            # Find JSON object
+            match = re.search(r'\{.*\}', json_part, re.DOTALL)
+            if match:
+                viz_data = json.loads(match.group(0))
+                return {
+                    "text": text_part,
+                    "visualization": viz_data
+                }
         except json.JSONDecodeError as e:
-            print(f"[Video Command] JSON parse error: {e}")
-            return jsonify({
-                "error": "Invalid visualization format",
-                "message": response_text
-            }), 500
-        
-    except Exception as e:
-        print(f"[Video Command] Exception: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+            print(f"[Parse] JSON decode error: {e}")
+    
+    # No visualization, just return text
+    return {
+        "text": response_text,
+        "visualization": None
+    }
 
 
 if __name__ == '__main__':
