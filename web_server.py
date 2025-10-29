@@ -29,19 +29,22 @@ voice_id = os.getenv("ELEVENLABS_VOICE_ID", "pNInz6obpgDQGcFmaJgB")
 railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN")
 SERVER_URL = f"https://{railway_domain}" if railway_domain else os.getenv("SERVER_URL", "http://localhost:5001")
 
-# LangGraph setup - Support both production and staging
-LANGGRAPH_URL_PROD = os.getenv("LANGGRAPH_URL_PROD", "https://roa-voice-prod-59235014c2ad5a5f830e9e124171824f.us.langgraph.app")
+# LangGraph setup - Support dev, staging, and production
+LANGGRAPH_URL_DEV = os.getenv("LANGGRAPH_URL_DEV", "https://roa-voice-dev-6d8ceb540dee59cebd2fc361aa316dec.us.langgraph.app")
 LANGGRAPH_URL_STAGING = os.getenv("LANGGRAPH_URL_STAGING", "https://roa-voice-staging-66a6f6ec95d9546995a4f3352ad05df2.us.langgraph.app")
+LANGGRAPH_URL_PROD = os.getenv("LANGGRAPH_URL_PROD", "https://roa-voice-prod-59235014c2ad5a5f830e9e124171824f.us.langgraph.app")
 LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
 GRAPH_NAME = "agent"  # Deployed graph name
 
-# Create LangGraph clients for both environments
-langgraph_client_prod = get_sync_client(url=LANGGRAPH_URL_PROD, api_key=LANGSMITH_API_KEY)
+# Create LangGraph clients for all environments
+langgraph_client_dev = get_sync_client(url=LANGGRAPH_URL_DEV, api_key=LANGSMITH_API_KEY)
 langgraph_client_staging = get_sync_client(url=LANGGRAPH_URL_STAGING, api_key=LANGSMITH_API_KEY)
+langgraph_client_prod = get_sync_client(url=LANGGRAPH_URL_PROD, api_key=LANGSMITH_API_KEY)
 
 print(f"🌐 Server URL: {SERVER_URL}")
-print(f"🔗 Production LangGraph: {LANGGRAPH_URL_PROD}")
+print(f"🔗 Dev LangGraph: {LANGGRAPH_URL_DEV}")
 print(f"🔗 Staging LangGraph: {LANGGRAPH_URL_STAGING}")
+print(f"🔗 Production LangGraph: {LANGGRAPH_URL_PROD}")
 print(f"🔑 Using API key: {LANGSMITH_API_KEY[:20] if LANGSMITH_API_KEY else 'None'}...")
 
 # Store audio responses temporarily
@@ -57,24 +60,24 @@ def _generate_thread_id() -> str:
     return str(uuid.uuid4())
 
 
-def _hash_caller_id(caller_id: str, is_staging: bool = False) -> str:
+def _hash_caller_id(caller_id: str, environment: str = "prod") -> str:
     """Convert caller_id to a deterministic thread identifier.
     
     This ensures:
     1. Each unique caller gets their own isolated thread
     2. Same caller always maps to same thread (conversation continuity within session)
-    3. Staging and production threads are separate
+    3. Dev, staging, and production threads are separate
     4. No server-side caching needed - LangGraph manages thread persistence
     
     Args:
         caller_id: Unique identifier for the caller (from ElevenLabs)
-        is_staging: Whether this is for staging environment
+        environment: Environment name ("dev", "staging", or "prod")
     
     Returns:
         Deterministic thread identifier that can be used directly with LangGraph
     """
-    # Add environment prefix to ensure staging/prod separation
-    env_prefix = "staging" if is_staging else "prod"
+    # Add environment prefix to ensure dev/staging/prod separation
+    env_prefix = environment
     
     # Create deterministic hash from caller_id
     # Using SHA256 for consistent, collision-resistant hashing
@@ -86,12 +89,24 @@ def _hash_caller_id(caller_id: str, is_staging: bool = False) -> str:
     return f"{env_prefix}-{hash_obj.hexdigest()[:16]}"
 
 
-def get_langgraph_client(is_staging: bool = False):
-    """Get the appropriate LangGraph client based on environment."""
-    return langgraph_client_staging if is_staging else langgraph_client_prod
+def get_langgraph_client(environment: str = "prod"):
+    """Get the appropriate LangGraph client based on environment.
+    
+    Args:
+        environment: Environment name ("dev", "staging", or "prod")
+    
+    Returns:
+        LangGraph client for the specified environment
+    """
+    if environment == "dev":
+        return langgraph_client_dev
+    elif environment == "staging":
+        return langgraph_client_staging
+    else:
+        return langgraph_client_prod
 
 
-def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool = False) -> str:
+def get_thread_id_for_caller(caller_id: Optional[str] = None, environment: str = "prod") -> str:
     """Get or create LangGraph thread for a caller.
     
     Creates a deterministic mapping: caller_id → LangGraph thread_id
@@ -99,7 +114,7 @@ def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool =
     
     Args:
         caller_id: Unique caller identifier (from ElevenLabs convo_id or caller_id)
-        is_staging: Whether to use staging environment
+        environment: Environment name ("dev", "staging", or "prod")
     
     Returns:
         LangGraph thread ID to use with API calls
@@ -110,20 +125,19 @@ def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool =
         print(f"⚠️  No caller_id provided, generated random: {caller_id}")
     
     # Create deterministic cache key
-    cache_key = _hash_caller_id(caller_id, is_staging)
-    env = "staging" if is_staging else "production"
+    cache_key = _hash_caller_id(caller_id, environment)
     
     # Check if we already have a LangGraph thread for this caller
     if cache_key not in thread_id_cache:
         # Create actual thread in LangGraph
-        client = get_langgraph_client(is_staging)
+        client = get_langgraph_client(environment)
         thread = client.threads.create()
         langgraph_thread_id = thread["thread_id"]
         thread_id_cache[cache_key] = langgraph_thread_id
-        print(f"✨ Created {env} thread for caller '{caller_id[:30]}...' → LangGraph thread: {langgraph_thread_id}")
+        print(f"✨ Created {environment} thread for caller '{caller_id[:30]}...' → LangGraph thread: {langgraph_thread_id}")
     else:
         langgraph_thread_id = thread_id_cache[cache_key]
-        print(f"♻️  Reusing {env} thread for caller '{caller_id[:30]}...' → LangGraph thread: {langgraph_thread_id}")
+        print(f"♻️  Reusing {environment} thread for caller '{caller_id[:30]}...' → LangGraph thread: {langgraph_thread_id}")
     
     return langgraph_thread_id
 
@@ -132,7 +146,7 @@ def get_thread_id_for_caller(caller_id: Optional[str] = None, is_staging: bool =
 # Alternative Thread Management (Time-Based Expiry) - Currently Unused
 # ============================================================================
 
-def get_thread_id_with_expiry(caller_id: Optional[str] = None, is_staging: bool = False, expiry_hours: int = 24) -> str:
+def get_thread_id_with_expiry(caller_id: Optional[str] = None, environment: str = "prod", expiry_hours: int = 24) -> str:
     """Alternative: Get thread ID with time-based expiry (currently unused).
     
     This function implements time-based thread expiry by appending a date suffix
@@ -145,7 +159,7 @@ def get_thread_id_with_expiry(caller_id: Optional[str] = None, is_staging: bool 
     
     Args:
         caller_id: Unique caller identifier
-        is_staging: Whether to use staging environment
+        environment: Environment name ("dev", "staging", or "prod")
         expiry_hours: Hours until thread expires (default: 24)
     
     Returns:
@@ -157,7 +171,7 @@ def get_thread_id_with_expiry(caller_id: Optional[str] = None, is_staging: bool 
         caller_id = _generate_thread_id()
     
     # Hash the base caller_id
-    base_thread_id = _hash_caller_id(caller_id, is_staging)
+    base_thread_id = _hash_caller_id(caller_id, environment)
     
     # Calculate expiry bucket (rounds down to nearest expiry period)
     now = datetime.datetime.utcnow()
@@ -168,26 +182,24 @@ def get_thread_id_with_expiry(caller_id: Optional[str] = None, is_staging: bool 
     # This ensures threads expire after expiry_hours
     thread_id_with_expiry = f"{base_thread_id}-{expiry_bucket}"
     
-    env = "staging" if is_staging else "production"
-    print(f"🔗 {env.capitalize()} thread (expires in {expiry_hours}h) for '{caller_id[:30]}...' → {thread_id_with_expiry}")
+    print(f"🔗 {environment.capitalize()} thread (expires in {expiry_hours}h) for '{caller_id[:30]}...' → {thread_id_with_expiry}")
     
     return thread_id_with_expiry
 
-def call_agent(thread_id: str, message: str, is_staging: bool = False) -> str:
+def call_agent(thread_id: str, message: str, environment: str = "prod") -> str:
     """Call the LangGraph agent and return response
     
     Args:
         thread_id: Thread ID for conversation
         message: User message
-        is_staging: Whether to use staging environment
+        environment: Environment name ("dev", "staging", or "prod")
     """
     input_data = {"messages": [{"role": "user", "content": message}]}
     response_text = ""
-    client = get_langgraph_client(is_staging)
-    env = "staging" if is_staging else "production"
+    client = get_langgraph_client(environment)
     
     try:
-        print(f"📡 Calling {env} LangGraph: thread={thread_id}, assistant={GRAPH_NAME}")
+        print(f"📡 Calling {environment} LangGraph: thread={thread_id}, assistant={GRAPH_NAME}")
         for chunk in client.runs.stream(
             thread_id,
             assistant_id=GRAPH_NAME,  # Use assistant_id parameter
@@ -256,20 +268,23 @@ def process_voice_text_only():
         transcript_text = transcription.text
         print(f"Transcript: {transcript_text}")
         
-        # Detect staging environment
-        is_staging = request.headers.get('staging', 'false').lower() == 'true'
+        # Detect environment from 'stage' header (sent by ElevenLabs)
+        # Values: "dev", "staging", "prod" (default to "prod")
+        environment = request.headers.get('stage', 'prod').lower()
+        if environment not in ['dev', 'staging', 'prod']:
+            environment = 'prod'
         
         # Get caller_id - prioritize ElevenLabs convo_id, fallback to caller_id or thread_hint
         caller_id = request.headers.get('convo_id') or request.headers.get('caller_id') or thread_hint
         
         # Get thread ID for this caller (no caching, LangGraph manages persistence)
-        thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
+        thread_id = get_thread_id_for_caller(caller_id, environment=environment)
         
         # Send to agent with thread_id for conversation memory
         print(f"Sending to agent (thread: {thread_id})...")
         
         # Call agent with routing
-        response_text = call_agent(thread_id, transcript_text, is_staging=is_staging)
+        response_text = call_agent(thread_id, transcript_text, environment=environment)
         
         print(f"Agent response: {response_text}")
         
@@ -305,21 +320,24 @@ def chat():
             print("❌ [Backend] No message provided")
             return jsonify({'error': 'No message provided'}), 400
         
-        # Detect staging environment
-        is_staging = request.headers.get('staging', 'false').lower() == 'true'
+        # Detect environment from 'stage' header (sent by ElevenLabs)
+        # Values: "dev", "staging", "prod" (default to "prod")
+        environment = request.headers.get('stage', 'prod').lower()
+        if environment not in ['dev', 'staging', 'prod']:
+            environment = 'prod'
         
         # Get caller_id - prioritize ElevenLabs convo_id, fallback to caller_id or thread_hint
         caller_id = request.headers.get('convo_id') or request.headers.get('caller_id') or thread_hint
         
         # Get thread ID for this caller
-        thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
+        thread_id = get_thread_id_for_caller(caller_id, environment=environment)
         print(f"🧵 [Backend] Thread ID: {thread_id}")
         
         # Send to agent with thread_id for conversation memory
         print(f"🚀 [Backend] Sending to LangGraph agent...")
         
         # Call agent with routing
-        response_text = call_agent(thread_id, message, is_staging=is_staging)
+        response_text = call_agent(thread_id, message, environment=environment)
         
         print(f"Agent response: {response_text}")
         
@@ -454,7 +472,7 @@ def get_audio(audio_id):
 # OpenAI-Compatible Endpoint for ElevenLabs Conversational AI Integration
 # ============================================================================
 
-def stream_openai_response(thread_id: str, message: str, is_staging: bool = False) -> Generator[str, None, None]:
+def stream_openai_response(thread_id: str, message: str, environment: str = "prod") -> Generator[str, None, None]:
     """
     Stream LangGraph agent responses in OpenAI-compatible format.
     This endpoint is used by ElevenLabs Conversational AI Custom LLM integration.
@@ -462,16 +480,15 @@ def stream_openai_response(thread_id: str, message: str, is_staging: bool = Fals
     Args:
         thread_id: Thread ID for conversation
         message: User message
-        is_staging: Whether to use staging environment
+        environment: Environment name ("dev", "staging", or "prod")
     """
     input_data = {"messages": [{"role": "user", "content": message}]}
     has_content = False
     accumulated_text = ""
-    client = get_langgraph_client(is_staging)
-    env = "staging" if is_staging else "production"
+    client = get_langgraph_client(environment)
     
     try:
-        print(f"[OpenAI Endpoint] Calling {env} LangGraph: thread={thread_id}")
+        print(f"[OpenAI Endpoint] Calling {environment} LangGraph: thread={thread_id}")
         
         # Stream from LangGraph
         # assistant_id is the deployed graph name
@@ -587,9 +604,11 @@ def openai_chat_completions():
         if not user_message:
             return jsonify({"error": "No user message found"}), 400
         
-        # Determine environment from 'staging' header (sent by ElevenLabs agents)
-        is_staging = request.headers.get('staging', 'false').lower() == 'true'
-        env = "staging" if is_staging else "production"
+        # Determine environment from 'stage' header (sent by ElevenLabs agents)
+        # Values: "dev", "staging", "prod" (default to "prod")
+        environment = request.headers.get('stage', 'prod').lower()
+        if environment not in ['dev', 'staging', 'prod']:
+            environment = 'prod'
         
         # Get caller_id from ElevenLabs (unique per conversation)
         # Priority: convo_id (ElevenLabs conversation ID) > caller_id > X-Thread-Token > user field
@@ -602,12 +621,12 @@ def openai_chat_completions():
         )
         
         # Get thread ID for this specific caller (LangGraph manages persistence)
-        thread_id = get_thread_id_for_caller(caller_id, is_staging=is_staging)
-        print(f"[OpenAI Endpoint] Environment: {env}, Caller ID: {caller_id[:30]}..., Thread ID: {thread_id}, Message: {user_message[:50]}...")
+        thread_id = get_thread_id_for_caller(caller_id, environment=environment)
+        print(f"[OpenAI Endpoint] Environment: {environment}, Caller ID: {caller_id[:30]}..., Thread ID: {thread_id}, Message: {user_message[:50]}...")
         
         # Stream response in OpenAI format
         response = Response(
-            stream_with_context(stream_openai_response(thread_id, user_message, is_staging=is_staging)),
+            stream_with_context(stream_openai_response(thread_id, user_message, environment=environment)),
             mimetype='text/event-stream'
         )
         response.headers['Cache-Control'] = 'no-cache'
