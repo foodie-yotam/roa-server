@@ -319,6 +319,20 @@ def stream_openai_response(thread_id: str, message: str, environment: str = "pro
     try:
         print(f"[OpenAI Endpoint] Calling {environment} LangGraph: thread={thread_id}")
         
+        # Send immediate initial chunk to prevent timeout
+        initial_chunk = {
+            "id": f"chatcmpl-{thread_id}",
+            "object": "chat.completion.chunk",
+            "created": 1234567890,
+            "model": "langgraph-agent",
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": ""},
+                "finish_reason": None
+            }]
+        }
+        yield f"data: {json.dumps(initial_chunk)}\n\n"
+        
         # Stream from LangGraph
         # assistant_id is the deployed graph name
         for chunk in client.runs.stream(
