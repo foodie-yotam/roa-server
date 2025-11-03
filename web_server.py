@@ -263,8 +263,28 @@ def chat():
         if environment not in ['dev', 'staging', 'prod']:
             environment = 'prod'
         
-        # Get caller_id - prioritize ElevenLabs convo_id, fallback to caller_id or thread_hint
-        caller_id = request.headers.get('convo_id') or request.headers.get('caller_id') or thread_hint
+        # Create unique thread identifier from BOTH caller_id AND convo_id
+        # This ensures each conversation is isolated even if same caller has multiple convos
+        raw_caller_id = request.headers.get('caller_id')
+        raw_convo_id = request.headers.get('convo_id')
+        
+        # Combine both IDs to create unique thread identifier
+        if raw_caller_id and raw_convo_id:
+            # Both present: combine them for unique thread per conversation
+            caller_id = f"{raw_caller_id}:{raw_convo_id}"
+            print(f"📞 [Backend] Caller: {raw_caller_id[:20]}..., Convo: {raw_convo_id[:20]}...")
+        elif raw_convo_id:
+            # Only convo_id: use it alone
+            caller_id = raw_convo_id
+            print(f"📞 [Backend] Convo ID only: {raw_convo_id[:30]}...")
+        elif raw_caller_id:
+            # Only caller_id: use it alone
+            caller_id = raw_caller_id
+            print(f"📞 [Backend] Caller ID only: {raw_caller_id[:30]}...")
+        else:
+            # Fallback
+            caller_id = thread_hint
+            print(f"📞 [Backend] Fallback thread hint: {thread_hint}")
         
         # Get thread ID for this caller
         thread_id = get_thread_id_for_caller(caller_id, environment=environment)
@@ -453,15 +473,27 @@ def openai_chat_completions():
         if environment not in ['dev', 'staging', 'prod']:
             environment = 'prod'
         
-        # Get caller_id from ElevenLabs (unique per conversation)
-        # Priority: convo_id (ElevenLabs conversation ID) > caller_id > X-Thread-Token > user field
-        # This ensures each conversation gets its own isolated thread
-        caller_id = (
-            request.headers.get('convo_id') or 
-            request.headers.get('caller_id') or 
-            request.headers.get('X-Thread-Token') or
-            data.get('user', 'elevenlabs-user-fallback')
-        )
+        # Create unique thread identifier from BOTH caller_id AND convo_id
+        # This ensures each conversation is isolated even if same caller has multiple convos
+        raw_caller_id = request.headers.get('caller_id')
+        raw_convo_id = request.headers.get('convo_id')
+        
+        # Combine both IDs to create unique thread identifier
+        if raw_caller_id and raw_convo_id:
+            # Both present: combine them for unique thread per conversation
+            caller_id = f"{raw_caller_id}:{raw_convo_id}"
+        elif raw_convo_id:
+            # Only convo_id: use it alone
+            caller_id = raw_convo_id
+        elif raw_caller_id:
+            # Only caller_id: use it alone
+            caller_id = raw_caller_id
+        else:
+            # Fallback to other headers or user field
+            caller_id = (
+                request.headers.get('X-Thread-Token') or
+                data.get('user', 'elevenlabs-user-fallback')
+            )
         
         # Get thread ID for this specific caller (LangGraph manages persistence)
         thread_id = get_thread_id_for_caller(caller_id, environment=environment)
